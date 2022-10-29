@@ -1,0 +1,337 @@
+<!doctype html>
+
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Blend Normal Maps</title>
+</head>
+
+<body>
+  <h1>Blend Normal Maps</h1>
+  <p>Eight-bit PNG files supported</p>
+
+  <h2>Method</h2>
+  <input type="radio" name="method" id="reoriented" checked>
+  <label for="reoriented">Reoriented</label>
+  <input type="radio" name="method" id="udn">
+  <label for="udn">UDN</label>
+  <input type="radio" name="method" id="whiteout">
+  <label for="whiteout">Whiteout</label>
+  <input type="radio" name="method" id="partialDerivative">
+  <label for="partialDerivative">Partial derivative</label>
+  <input type="radio" name="method" id="linear">
+  <label for="linear">Linear</label>
+  <input type="radio" name="method" id="average">
+  <label for="average">Average</label>
+  <p><a href="https://blog.selfshadow.com/publications/blending-in-detail/">More info</a></p>
+
+  <h2 id="map1heading">Normal map 1</h2>
+  <input type="file" name="map1" id="map1" aria-labelledby="map1heading">
+  <div class="map-container" id="map1container"></div>
+
+  <h2 id="map2heading">Normal map 2</h2>
+  <input type="file" name="map2" id="map2" aria-labelledby="map2heading">
+  <div class="map-container" id="map2container"></div>
+
+  <h2>Combined result</h2>
+  <canvas id="result"></canvas>
+
+  <style>
+    .map-container img {
+      max-height: 256px;
+      max-width: 256px;
+    }
+
+  </style>
+
+  <script>
+    const map1Input = document.getElementById('map1')
+    const map2Input = document.getElementById('map2')
+
+    async function handleInput() {
+      const methodName = document.querySelector('input[name="method"]:checked').id
+      let map1ImageData
+      let map2ImageData
+
+      if (map1Input.files.length) map1ImageData = await showInputMapAndGetImageData('map1', map1Input.files[0])
+      if (map2Input.files.length) map2ImageData = await showInputMapAndGetImageData('map2', map2Input.files[0])
+
+      if (!map1ImageData || !map2ImageData) return
+
+      if (map1ImageData.width !== map2ImageData.width || map1ImageData.height !== map2ImageData.height)
+        return alert('Images must be same size')
+
+      let newImageData
+      if (methodName === 'average') newImageData = getAveragedImageData(map1ImageData, map2ImageData)
+      else if (methodName === 'linear') newImageData = getLinearBlendedImageData(map1ImageData, map2ImageData)
+      else if (methodName === 'overlay') newImageData = getOverlayBlendedImageData(map1ImageData, map2ImageData)
+      else if (methodName === 'partialDerivative') newImageData = getPartialDerivativeBlendedImageData(map1ImageData, map2ImageData)
+      else if (methodName === 'whiteout') newImageData = getWhiteoutBlendedImageData(map1ImageData, map2ImageData)
+      else if (methodName === 'udn') newImageData = getUdnBlendedImageData(map1ImageData, map2ImageData)
+      else if (methodName === 'reoriented') newImageData = getReorientedImageData(map1ImageData, map2ImageData)
+      else throw new Error('Unexpected algorithm name')
+
+      const canvas = document.getElementById('result')
+      canvas.width = map1ImageData.width
+      canvas.height = map1ImageData.height
+      const context = canvas.getContext('2d')
+      context.putImageData(newImageData, 0, 0)
+    }
+
+    const showInputMapAndGetImageData = (name, file) => new Promise((resolve, reject) => {
+      const fileReader = new FileReader()
+
+      fileReader.addEventListener('load', event => {
+        const dataURL = event.target.result
+        const imageElement = document.createElement('img')
+
+        imageElement.addEventListener('load', () => {
+          const canvas = document.createElement('canvas')
+          canvas.width = imageElement.width
+          canvas.height = imageElement.height
+          const context = canvas.getContext('2d')
+          context.drawImage(imageElement, 0, 0)
+          const imageData = context.getImageData(0, 0, imageElement.width, imageElement.height)
+          resolve(imageData)
+        })
+
+        imageElement.addEventListener('error', reject)
+
+        imageElement.src = dataURL
+        const containerElement = document.getElementById(`${name}container`)
+        containerElement.innerHTML = imageElement.outerHTML
+      })
+
+      fileReader.addEventListener('abort', reject)
+      fileReader.addEventListener('error', reject)
+
+      fileReader.readAsDataURL(file)
+    })
+
+    map1Input.addEventListener('change', handleInput)
+    map2Input.addEventListener('change', handleInput)
+
+    const methodButtons = document.querySelectorAll('input[name="method"]')
+    for (const button of methodButtons)
+      button.addEventListener('change', event => {
+        if (event.target.checked) handleInput()
+      })
+
+    const getMagnitude = (r, g, b) => Math.sqrt(r ** 2 + g ** 2 + b ** 2)
+
+    const getMagnitude255 = (r, g, b) => Math.sqrt(
+      (r / 255) ** 2
+      + (g / 255) ** 2
+      + (b / 255) ** 2
+    )
+
+    const getNormalized = (r, g, b) => {
+      const m = getMagnitude(r, g, b)
+      return [r / m, g / m, b / m]
+    }
+
+    const getNormalized255 = (r, g, b) => {
+      const m = getMagnitude255(r, g, b)
+      return [r / m, g / m, b / m]
+    }
+
+    function getAveragedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 1)
+        newDataArray[index] = Math.round((imageData1.data[index] + imageData2.data[index]) / 2)
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+
+    function getLinearBlendedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 4) {
+        const r1 = imageData1.data[index] * 2 - 255
+        const g1 = imageData1.data[index + 1] * 2 - 255
+        const b1 = imageData1.data[index + 2] * 2 - 255
+        const a1 = imageData1.data[index + 3]
+
+        const r2 = imageData2.data[index] * 2 - 255
+        const g2 = imageData2.data[index + 1] * 2 - 255
+        const b2 = imageData2.data[index + 2] * 2 - 255
+        const a2 = imageData2.data[index + 3]
+
+        const [r3, g3, b3] = getNormalized255(r1 + r2, g1 + g2, b1 + b2)
+
+        newDataArray[index] = Math.round(r3 * 0.5 + 127)
+        newDataArray[index + 1] = Math.round(g3 * 0.5 + 127)
+        newDataArray[index + 2] = Math.round(b3 * 0.5 + 127)
+        newDataArray[index + 3] = Math.round((a1 + a2) / 2)
+      }
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+
+    // Not working right
+    function getOverlayBlendedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 4) {
+        const r1 = imageData1.data[index]
+        const g1 = imageData1.data[index + 1]
+        const b1 = imageData1.data[index + 2]
+        const a1 = imageData1.data[index + 3]
+        const m1 = getMagnitude255(r1, g1, b1)
+
+        const r2 = imageData2.data[index]
+        const g2 = imageData2.data[index + 1]
+        const b2 = imageData2.data[index + 2]
+        const a2 = imageData2.data[index + 3]
+
+        let r3
+        let g3
+        let b3
+        if ((r1 + g1 + b1) / 3 < 127) {
+          r3 = 2 * (r1 / 255) * (r2 / 255) * 255
+          g3 = 2 * (g1 / 255) * (g2 / 255) * 255
+          b3 = 2 * (b1 / 255) * (b2 / 255) * 255
+        } else {
+          r3 = (1 - 2 * (1 - (r1 / 255)) * (1 - (r2 / 255))) * 255
+          g3 = (1 - 2 * (1 - (g1 / 255)) * (1 - (g2 / 255))) * 255
+          b3 = (1 - 2 * (1 - (b1 / 255)) * (1 - (b2 / 255))) * 255
+        }
+
+        const [r4, g4, b4] = getNormalized255(
+          r3 * 2 - 255,
+          g3 * 2 - 255,
+          b3 * 2 - 255,
+        )
+
+        newDataArray[index] = Math.round(r4 * 0.5 + 127)
+        newDataArray[index + 1] = Math.round(g4 * 0.5 + 127)
+        newDataArray[index + 2] = Math.round(b4 * 0.5 + 127)
+        newDataArray[index + 3] = Math.round((a1 + a2) / 2)
+      }
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+
+    function getPartialDerivativeBlendedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 4) {
+        const r1 = imageData1.data[index] * 2 - 255
+        const g1 = imageData1.data[index + 1] * 2 - 255
+        const b1 = imageData1.data[index + 2] * 2 - 255
+        const a1 = imageData1.data[index + 3]
+
+        const r2 = imageData2.data[index] * 2 - 255
+        const g2 = imageData2.data[index + 1] * 2 - 255
+        const b2 = imageData2.data[index + 2] * 2 - 255
+        const a2 = imageData2.data[index + 3]
+
+        const [r3, g3, b3] = getNormalized255(
+          r1 / b1 + r2 / b2,
+          g1 / b1 + g2 / b2,
+          1,
+        )
+
+        newDataArray[index] = Math.round(r3 * 0.5 + 127)
+        newDataArray[index + 1] = Math.round(g3 * 0.5 + 127)
+        newDataArray[index + 2] = Math.round(b3 * 0.5 + 127)
+        newDataArray[index + 3] = Math.round((a1 + a2) / 2)
+      }
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+
+    function getWhiteoutBlendedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 4) {
+        const r1 = imageData1.data[index] * 2 - 255
+        const g1 = imageData1.data[index + 1] * 2 - 255
+        const b1 = imageData1.data[index + 2] * 2 - 255
+        const a1 = imageData1.data[index + 3]
+
+        const r2 = imageData2.data[index] * 2 - 255
+        const g2 = imageData2.data[index + 1] * 2 - 255
+        const b2 = imageData2.data[index + 2] * 2 - 255
+        const a2 = imageData2.data[index + 3]
+
+        const [r3, g3, b3] = getNormalized255(
+          r1 + r2,
+          g1 + g2,
+          (b1 / 255) * (b2 / 255) * 255,
+        )
+
+        newDataArray[index] = Math.round(r3 * 0.5 + 127)
+        newDataArray[index + 1] = Math.round(g3 * 0.5 + 127)
+        newDataArray[index + 2] = Math.round(b3 * 0.5 + 127)
+        newDataArray[index + 3] = Math.round((a1 + a2) / 2)
+      }
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+
+    function getUdnBlendedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 4) {
+        const r1 = imageData1.data[index] * 2 - 255
+        const g1 = imageData1.data[index + 1] * 2 - 255
+        const b1 = imageData1.data[index + 2] * 2 - 255
+        const a1 = imageData1.data[index + 3]
+
+        const r2 = imageData2.data[index] * 2 - 255
+        const g2 = imageData2.data[index + 1] * 2 - 255
+        const b2 = imageData2.data[index + 2] * 2 - 255
+        const a2 = imageData2.data[index + 3]
+
+        const [r3, g3, b3] = getNormalized255(
+          r1 + r2,
+          g1 + g2,
+          b1,
+        )
+
+        newDataArray[index] = Math.round(r3 * 0.5 + 127)
+        newDataArray[index + 1] = Math.round(g3 * 0.5 + 127)
+        newDataArray[index + 2] = Math.round(b3 * 0.5 + 127)
+        newDataArray[index + 3] = Math.round((a1 + a2) / 2)
+      }
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+
+    function getReorientedImageData(imageData1, imageData2) {
+      const newDataArray = new Uint8ClampedArray(imageData1.data.length)
+
+      for (let index = 0; index < imageData1.data.length; index += 4) {
+        const r1 = (imageData1.data[index] / 255) * 2 - 1
+        const g1 = (imageData1.data[index + 1] / 255) * 2 - 1
+        const b1 = (imageData1.data[index + 2] / 255) * 2
+        const a1 = imageData1.data[index + 3] / 255
+
+        const r2 = (imageData2.data[index] / 255) * -2 + 1
+        const g2 = (imageData2.data[index + 1] / 255) * -2 + 1
+        const b2 = (imageData2.data[index + 2] / 255) * 2 - 1
+        const a2 = imageData2.data[index + 3] / 255
+
+        const dotProduct = r1 * r2 + g1 * g2 + b1 * b2
+
+        const [r3, g3, b3] = getNormalized(
+          r1 * dotProduct - r2 * b1,
+          g1 * dotProduct - g2 * b1,
+          b1 * dotProduct - b2 * b1
+        )
+
+        newDataArray[index] = Math.round(255 * (r3 * 0.5 + 0.5))
+        newDataArray[index + 1] = Math.round(255 * (g3 * 0.5 + 0.5))
+        newDataArray[index + 2] = Math.round(255 * (b3 * 0.5 + 0.5))
+        newDataArray[index + 3] = Math.round(255 * ((a1 + a2) / 2))
+      }
+
+      return new ImageData(newDataArray, imageData1.width)
+    }
+  </script>
+</body>
+
+</html>
